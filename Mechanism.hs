@@ -5,7 +5,6 @@
 module Mechanism where
 
 import qualified Data.Foldable as F
-import           Data.Function (on)
 import           Data.Functor ((<$>))
 import           Data.Functor.Identity (Identity(..))
 import           Data.Monoid (Monoid(..))
@@ -173,20 +172,20 @@ exPostEfficient :: (Ord ty, Ord u, UtilLift con i)
                 => Set out
                 -> Utility out con ty i u
                 -> Mechanism ty out -> Bool
-exPostEfficient outs f mc =
-  F.all (\pr -> paretoOptimal outs (socialChoice mc pr) f pr) . profiles $
-  typeSets mc
-
-paretoOptimal :: (Ord u, UtilLift con i)
-              => Set out
-              -> out
-              -> Utility out con ty i u
-              -> Profile Coll ty -> Bool
-paretoOptimal outs out f pr =
-  not . F.or $ S.map (\out' -> F.and (compareEach (>=) out') &&
-                               F.or (compareEach (>) out')) outs
+exPostEfficient outs f mc = F.all optimal . profiles $ typeSets mc
   where
-    compareEach cm out' = (P.zipWith cm `on` flip (eachAgent f) pr) out' out
+    optimal pr = paretoOptimal (flip (eachAgent f) pr <$> P.fromList (F.toList outs))
+                   (eachAgent f (socialChoice mc pr) pr)
+
+-- Textbook definition
+paretoOptimal' :: (Ord a) => Coll (Coll a) -> Coll a -> Bool
+paretoOptimal' cs c =
+  not . F.or $ (\c' -> F.and (P.zipWith (>=) c' c) && F.or (P.zipWith (>) c' c)) <$> cs
+
+-- De Morganed (a little clearer, I think)
+paretoOptimal :: (Ord a) => Coll (Coll a) -> Coll a -> Bool
+paretoOptimal cs c =
+  F.and $ (\c' -> (F.or (P.zipWith (<) c' c) || F.and (P.zipWith (<=) c' c))) <$> cs
 
 
 -- Helper
