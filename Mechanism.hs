@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 module Mechanism where
 
@@ -10,8 +11,9 @@ import           Data.Functor.Identity (Identity(..))
 import           Data.Monoid (Monoid(..))
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Vector (Vector)
-import qualified Data.Vector as V
+
+import           Mechanism.Profile.Vector (Coll)
+import qualified Mechanism.Profile.Vector as P
 
 -- n agents with N = {1, 2, ..., N}
 -- X is set of outcomes
@@ -24,7 +26,9 @@ import qualified Data.Vector as V
 -- uᵢ : X cross Θ → R
 -- common knowledge: X, N, Θ, P, uᵢ
 
--- Quasi short for quasilinear
+
+-- Types
+
 newtype Type ty = Type { runType :: ty }
   deriving (Eq, Ord, Num)
 newtype Outcome out = Outcome { runOutcome :: out }
@@ -38,71 +42,74 @@ type Index i = i
 
 type Utility out con ty i u = out -> Profile con ty -> i -> u
 type Valuation out ty u = Utility out Identity ty (Index ()) u
-type QuasiUtility out ty u = Utility (Outcome (QuasiOutcome out ty u)) Identity ty (Index Int) u
+type QuasiUtility out ty u = Utility (Outcome (QuasiOutcome out u)) Identity ty (Index Int) u
 type SocialChoice con ty out = Profile con ty -> out
 type Allocator con ty out = SocialChoice con ty out
-type Transfers u = Vector u
-type Strategy ty = Vector (ty, ty)
+type Transfers u = Coll u
+type Strategy ty = Coll (ty, ty)
 
-type Lifter a b out ty u = Utility out a ty b u -> Utility out Vector ty (Index Int) u 
+type Lifter a b out ty u = Utility out a ty b u -> Utility out Coll ty (Index Int) u
 quasiLift :: Lifter Identity (Index Int) out ty u 
-quasiLift f out pr i = f out (Identity $ pr V.! i) i
+quasiLift f out pr i = f out (singleProfile i pr) i
 valuationLift :: Lifter Identity (Index ()) out ty u 
-valuationLift f out pr i = f out (Identity $ pr V.! i) ()
+valuationLift f out pr i = f out (singleProfile i pr) ()
 class UtilLift a b where
   utilLift :: Lifter a b out ty u
 instance UtilLift Identity Int where
   utilLift = quasiLift
 instance UtilLift Identity () where
   utilLift = valuationLift
-instance UtilLift Vector Int where
+instance UtilLift Coll Int where
   utilLift = id
 
-data QuasiOutcome out ty u = QuasiOutcome { allocation :: out
-                                          , transfers :: Transfers u
-                                          }
+data QuasiOutcome out u = QuasiOutcome { allocation :: out
+                                       , transfers :: Transfers u
+                                       }
   deriving Show
-data Mechanism ty out = Mechanism { typeSets :: Vector (Set ty)
-                                  , socialChoice :: SocialChoice Vector ty out
+data Mechanism ty out = Mechanism { typeSets :: Coll (Set ty)
+                                  , socialChoice :: SocialChoice Coll ty out
                                   }
 
 totalUtility :: (Num u, UtilLift con i)
              => Utility out con ty i u
              -> out
-             -> Profile Vector ty -> u
+             -> Profile Coll ty -> u
 totalUtility f out pr = F.sum $ eachAgent f out pr
 
-profiles :: (Ord ty) => Vector (Set ty) -> Set (Vector ty)
+profiles :: (Ord ty) => Coll (Set ty) -> Set (Profile Coll ty)
 profiles tyss =
-  S.fromList $ V.fromList <$> sequence (V.toList $ S.toList <$> tyss)
+  S.fromList $ P.fromList <$> sequence (F.toList $ F.toList <$> tyss)
 
-strategies :: Set ty -> Vector (Strategy ty)
-strategies tys = V.zip tys' <$> V.replicateM (S.size tys) tys'
+strategies :: Set ty -> Coll (Strategy ty)
+strategies tys = P.zip tys' <$> P.replicateM (S.size tys) tys'
   where
-    tys' = V.fromList $ S.toList tys
+    tys' = P.fromList $ F.toList tys
+
+
+-- Quasilinear environment
 
 quasiUtility :: (Num u) => u -> Valuation out ty u -> QuasiUtility out ty u
 quasiUtility initial vl (Outcome out) ty i =
-  initial + vl (allocation out) ty () + transfers out V.! i
+  initial + vl (allocation out) ty () + transfers out P.! i
 
 summarize :: (Num u)
           => Valuation out ty u
-          -> Outcome (QuasiOutcome out ty u)
-          -> Profile Vector ty -> Vector u
+          -> Outcome (QuasiOutcome out u)
+          -> Profile Coll ty -> Coll u
 summarize vl = eachAgent (quasiUtility 0 vl)
 
-singleProfile :: Index Int -> Profile Vector ty -> Profile Identity ty
-singleProfile i pr = Identity $ pr V.! i
+singleProfile :: Index Int -> Profile Coll ty -> Profile Identity ty
+singleProfile i pr = Identity $ pr P.! i
 
-narrowProfile :: Index Int -> Profile Vector ty -> Profile Vector ty
-narrowProfile i = V.ifilter (const . (/=) i)
+narrowProfile :: Index Int -> Profile Coll ty -> Profile Coll ty
+narrowProfile i = P.ifilter (const . (/=) i)
 
 clarke :: (Num u)
-       => Allocator Vector ty out
+       => Allocator Coll ty out
        -> Valuation out ty u
-       -> Profile Vector ty
+       -> Profile Coll ty
        -> Transfers u
-clarke al vl pr = groves al vl pr (V.imap tr pr)
+clarke al vl pr = groves al vl pr (P.imap tr pr)
   where
     tr i _ = negate $ totalUtility vl (al others) others
       where
@@ -110,42 +117,23 @@ clarke al vl pr = groves al vl pr (V.imap tr pr)
 
 -- input tᵢ should be derived only from θ_{-i}
 groves :: (Num u)
-       => Allocator Vector ty out
+       => Allocator Coll ty out
        -> Valuation out ty u
-       -> Profile Vector ty
+       -> Profile Coll ty
        -> Transfers u
        -> Transfers u
 groves al vl pr =
-  V.zipWith (+) (V.imap (\i _ -> totalUtility vl (al pr) (narrowProfile i pr)) pr)
+  P.zipWith (+) (P.imap (\i _ -> totalUtility vl (al pr) (narrowProfile i pr)) pr)
 
-data Project = Project { completed :: Bool
-                       , perCapitaCost :: Util Double
-                       }
-  deriving (Eq, Ord, Show)
-           
-publicProject :: Mechanism (Type (Util Double)) (Outcome (QuasiOutcome (Outcome Project) (Type (Util Double)) (Util Double)))
-publicProject =
-  Mechanism (V.replicate 2 $ S.fromList [20, 60])
-    (\pr -> Outcome $ QuasiOutcome (al pr) (clarke al publicValuation pr))
-  where
-    cost = Util 50
-    al p =
-      Outcome $ Project (F.sum p > Type cost) (cost / fromIntegral (V.length p))
 
-publicOutcomes :: Set (Outcome Project)
-publicOutcomes = S.fromList $ (\b -> Outcome $ Project b 25) <$> [True, False]
-
-publicValuation :: Valuation (Outcome Project) (Type (Util Double)) (Util Double)
-publicValuation out (Identity (Type ty)) () =
-  case out of
-    Outcome (Project{completed = True,perCapitaCost = cs}) -> ty - cs
-    Outcome (Project{completed = False})                   -> 0
+-- Properties
 
 exPostRational :: (Num u, Ord u, Ord ty, UtilLift con i)
                => Utility out con ty i u
                -> Mechanism ty out -> Bool
 exPostRational f mc =
-  F.all (\pr -> F.all (>= 0) $ eachAgent f (socialChoice mc pr) pr) . profiles $ typeSets mc
+  F.all (\pr -> F.all (>= 0) $ eachAgent f (socialChoice mc pr) pr) .
+  profiles $ typeSets mc
 
 data BudgetBalance = Strict
                    | Weak
@@ -160,7 +148,7 @@ instance Monoid BudgetBalance where
   mempty = Strict
 
 budget :: (Ord ty, Ord u, Num u)
-       => Mechanism ty (Outcome (QuasiOutcome out ty u)) -> BudgetBalance
+       => Mechanism ty (Outcome (QuasiOutcome out u)) -> BudgetBalance
 budget mc =
   F.fold .
   S.map (balanced . F.sum . transfers . runOutcome . socialChoice mc) .
@@ -173,7 +161,7 @@ budget mc =
 
 allocativelyEfficient :: (Ord ty, Num u, Ord u)
                       => Set out
-                      -> Mechanism ty (Outcome (QuasiOutcome out ty u))
+                      -> Mechanism ty (Outcome (QuasiOutcome out u))
                       -> Valuation out ty u -> Bool
 allocativelyEfficient outs mc vl = F.all test . profiles $ typeSets mc
   where
@@ -193,19 +181,47 @@ paretoOptimal :: (Ord u, UtilLift con i)
               => Set out
               -> out
               -> Utility out con ty i u
-              -> Profile Vector ty -> Bool
+              -> Profile Coll ty -> Bool
 paretoOptimal outs out f pr =
   not . F.or $ S.map (\out' -> F.and (compareEach (>=) out') &&
                                F.or (compareEach (>) out')) outs
   where
-    compareEach cm out' = (V.zipWith cm `on` flip (eachAgent f) pr) out' out
+    compareEach cm out' = (P.zipWith cm `on` flip (eachAgent f) pr) out' out
+
+
+-- Helper
 
 eachAgent :: (UtilLift con i)
           => Utility out con ty i u
           -> out
-          -> Profile Vector ty -> Vector u
-eachAgent f out pr = V.imap (\i _ -> utilLift f out pr i) pr
+          -> Profile Coll ty -> Coll u
+eachAgent f out pr = P.imap (\i _ -> utilLift f out pr i) pr
 
+
+-- Example
+
+data Project = Project { completed :: Bool
+                       , perCapitaCost :: Util Double
+                       }
+  deriving (Eq, Ord, Show)
+           
+publicProject :: Mechanism (Type (Util Double)) (Outcome (QuasiOutcome (Outcome Project) (Util Double)))
+publicProject =
+  Mechanism (P.replicate 2 $ S.fromList [20, 60])
+    (\pr -> Outcome $ QuasiOutcome (al pr) (clarke al publicValuation pr))
+  where
+    cost = Util 50
+    al p =
+      Outcome $ Project (F.sum p > Type cost) (cost / fromIntegral (P.length p))
+
+publicOutcomes :: Set (Outcome Project)
+publicOutcomes = S.fromList $ (\b -> Outcome $ Project b 25) <$> [True, False]
+
+publicValuation :: Valuation (Outcome Project) (Type (Util Double)) (Util Double)
+publicValuation out (Identity (Type ty)) () =
+  case out of
+    Outcome (Project{completed = True,perCapitaCost = cs}) -> ty - cs
+    Outcome (Project{completed = False})                   -> 0
 
 -- equilibria :: EquilibriumType -> Mechanism ty out -> Strategy ty
 -- implementable :: EquilibriumType -> Mechanism ty out ->
