@@ -14,6 +14,9 @@ replicateM = V.replicateM
 zip :: Vector a -> Vector b -> Vector (a, b)
 zip = V.zip
 
+unzip :: Vector (a, b) -> (Vector a, Vector b)
+unzip = V.unzip
+
 (!) :: Vector a -> Int -> a
 (!) = (V.!)
 

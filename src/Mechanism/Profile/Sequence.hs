@@ -1,5 +1,6 @@
 module Mechanism.Profile.Sequence where
 
+import qualified Data.Foldable as F
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as S
 
@@ -13,6 +14,9 @@ replicateM = S.replicateM
 
 zip :: Seq a -> Seq b -> Seq (a, b)
 zip = S.zip
+
+unzip :: Seq (a, b) -> (Seq a, Seq b)
+unzip = F.foldr (\(a,b) ~(as,bs) -> (a S.<| as, b S.<| bs)) (S.empty,S.empty)
 
 (!) :: Seq a -> Int -> a
 (!) = S.index
