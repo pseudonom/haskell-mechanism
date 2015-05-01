@@ -4,7 +4,7 @@
 module Mechanism where
 
 import           Control.Applicative (Const(..), pure)
-import           Control.Monad (join, replicateM)
+import           Control.Monad (replicateM)
 import qualified Data.Foldable as F
 import           Data.Functor ((<$>))
 import           Data.Monoid (Monoid(..))
@@ -29,12 +29,6 @@ import qualified Mechanism.Profile.Sequence as P
 
 -- Types
 
-data Game ac con out ty u =
-       Game
-         { utilities :: Profile (Coll (Utility out (con ac) ty u))
-         , mechanism :: Mechanism ac ty out
-         }
-
 newtype Type ty = Type { runType :: ty }
   deriving (Eq, Ord, Num)
 newtype Action ac = Action { runAction :: ac }
@@ -43,59 +37,79 @@ newtype Outcome out = Outcome { runOutcome :: out }
   deriving (Eq, Ord, Show)
 newtype Util u = Util { runUtil :: u }
   deriving (Eq, Ord, Num, Fractional, Show)
-type Numeraire n = Util n
 
-type Profile pr = pr 
+type Profile con pr = con pr 
 type Index i = i
 
-type Utility out ac ty u = out -> Profile ac -> ty -> u
-type Valuation out ty u = Utility out (Const () ty) ty u
-type QuasiUtility out ty u = Utility (Outcome (QuasiOutcome out u)) (Const () ty) ty u
-type SocialChoice pr out = Profile pr -> out
-type Allocator pr out = SocialChoice pr out
-type Transfer u = u
-type Strategy ty ac = Coll (ty, ac)
+type Utility out con ac ty u = Outcome out -> Profile con (Action ac) -> Type ty -> Util u
+type Valuation out ty u = Utility out (Const ()) ty ty u
+type QuasiUtility out ty u = Utility (QuasiOutcome out u) (Const ()) ty ty u
+type SocialChoice ac out = Actions ac -> Outcome out
+type Allocator ac out = SocialChoice ac out
+type Transfer u = Util u
+type Strategy ty ac = Coll (Type ty, Action ac)
+type Match ty ac = Profile Coll (Type ty, Action ac)
+
+type Actions a = Profile Coll (Action a)
+type Types a = Profile Coll (Type a)
+type Transfers u = Profile Coll (Transfer u)
+type TypeSets ty = Profile Coll (Set (Type ty))
+type ActionSets ac = Profile Coll (Set (Action ac))
+type Valuations out ty u = Profile Coll (Valuation out ty u)
+type Utilities out con ac ty u = Profile Coll (Utility out con ac ty u)
+type Utils u = Profile Coll (Util u)
 
 data QuasiOutcome out u =
        QuasiOutcome
-         { allocation :: out
-         , transfers :: Profile (Coll (Transfer u))
+         { allocation :: Outcome out
+         , transfers :: Transfers u
          }
   deriving Show
 type DirectMechanism ty out = Mechanism ty ty out
 data Mechanism ac ty out =
        Mechanism
-         { actionSets :: Profile (Coll (Set ac))
-         , typeSets :: Profile (Coll (Set ty))
-         , socialChoice :: SocialChoice (Coll ac) out
+         { actionSets :: ActionSets ac
+         , typeSets :: TypeSets ty
+         , socialChoice :: SocialChoice ac out
+         }
+data Game ac con out ty u =
+       Game
+         { utilities :: Utilities out con ac ty u
+         , mechanism :: Mechanism ac ty out
          }
 
 class Narrow a where
-  narrow :: Profile (Coll ac) -> Profile (a ac)
+  narrow :: Profile Coll (Action ac) -> Profile a (Action ac)
 instance Narrow (Const ()) where
   narrow _ = Const ()
 instance Narrow Coll where
   narrow = id
 
-directMechanism :: Profile (Coll (Set ty))
-                -> SocialChoice (Coll ty) out
-                -> Mechanism ty ty out
-directMechanism = join Mechanism
+directMechanism :: (Ord ty)
+                => TypeSets ty
+                -> SocialChoice ty out
+                -> DirectMechanism ty out
+directMechanism tyss = Mechanism (S.map honest <$> tyss) tyss
 
-profiles :: (Ord a) => Profile (Coll (Set a)) -> Set (Profile (Coll a))
+honest :: Type ty -> Action ty
+honest (Type ty) = Action ty
+honest' :: Action ty -> Type ty
+honest' (Action ty) = Type ty
+
+profiles :: (Ord a) => Profile Coll (Set a) -> Set (Profile Coll a)
 profiles tyss =
   S.fromList $ P.fromList <$> T.sequence (F.toList $ F.toList <$> tyss)
 
-strategies :: (Ord ac, Ord ty) => Set ty -> Set ac -> Set (Strategy ty ac)
+strategies :: (Ord ac, Ord ty) => Set (Type ty) -> Set (Action ac) -> Set (Strategy ty ac)
 strategies tys acs =
   S.fromList $ P.fromList . zip (F.toList tys) <$>
                replicateM (S.size tys) (F.toList acs)
 
-games :: (Ord ac, Ord ty)
-      => Profile (Coll (Set ty))
-      -> Profile (Coll (Set ac))
-      -> Set (Profile (Coll (ty, ac)))
-games tyss acss = profiles $ P.zipWith pairs tyss acss
+matches :: (Ord ac, Ord ty)
+      => TypeSets ty
+      -> ActionSets ac
+      -> Set (Match ty ac)
+matches tyss acss = profiles $ P.zipWith pairs tyss acss
   where
     pairs tys acs = S.fromList . F.toList $ do
       ty <- F.toList tys
@@ -106,31 +120,31 @@ games tyss acss = profiles $ P.zipWith pairs tyss acss
 -- Quasilinear environment
 
 quasiUtility :: (Num u)
-             => u
+             => Util u
              -> Valuation out ty u
              -> Index Int
              -> QuasiUtility out ty u
 quasiUtility initial vl i (Outcome out) (Const ()) ty =
   initial + vl (allocation out) (Const ()) ty + transfers out P.! i
 
-narrowProfile :: Index Int -> Profile (Coll a) -> Profile (Coll a)
+narrowProfile :: Index Int -> Profile Coll a -> Profile Coll a
 narrowProfile i = P.ifilter (const . (/=) i)
 
 clarkes :: (Num u)
-        => Allocator (Coll ty) out
-        -> Profile (Coll (Valuation out ty u))
-        -> Profile (Coll ty)
-        -> Profile (Coll (Transfer u))
+        => Allocator ty out
+        -> Valuations out ty u
+        -> Types ty
+        -> Transfers u
 clarkes al vls tys =
   P.imap
-    (\i _ -> clarke (al tys) (al $ narrowProfile i tys) (narrowProfile i vls) (narrowProfile i tys))
+    (\i _ -> clarke (al $ honest <$> tys) (al . narrowProfile i $ honest <$> tys) (narrowProfile i vls) (narrowProfile i tys))
     tys
 
 clarke :: (Num u)
-       => out
-       -> out
-       -> Profile (Coll (Valuation out ty u))
-       -> Profile (Coll ty)
+       => Outcome out
+       -> Outcome out
+       -> Valuations out ty u
+       -> Types ty
        -> Transfer u
 clarke withAgent withoutAgent vls tys =
   grove withAgent vls tys . negate $
@@ -139,19 +153,19 @@ clarke withAgent withoutAgent vls tys =
 -- Profile of `ty` rather than `ac` because dominant incentive compatible
 -- Profiles don't include self, input transfer shouldn't depend on self
 grove :: (Num u)
-      => out
-      -> Profile (Coll (Valuation out ty u))
-      -> Profile (Coll ty)
+      => Outcome out
+      -> Valuations out ty u
+      -> Types ty
       -> Transfer u
       -> Transfer u
 grove out vls tys = (+) (totalUtility out vls (Const ()) tys)
 
 groves :: (Num u)
-        => out
-        -> Profile (Coll (Valuation out ty u))
-        -> Profile (Coll ty)
-        -> Profile (Coll (Transfer u))
-        -> Profile (Coll (Transfer u))
+        => Outcome out
+        -> Valuations out ty u
+        -> Types ty
+        -> Transfers u
+        -> Transfers u
 groves out vls tys =
   P.imap (\i -> grove out (narrowProfile i vls) (narrowProfile i tys))
 
@@ -161,7 +175,7 @@ groves out vls tys =
 exPostRational :: (Ord u, Num u, Ord ty, Ord ac, Narrow con)
                => Game ac con out ty u -> Bool
 exPostRational (Game fs (Mechanism acss tyss sc)) =
-  F.all allAgents $ games tyss acss
+  F.all allAgents $ matches tyss acss
   where
     allAgents gm = F.all (>= 0) $ eachAgent (sc acs) fs (narrow acs) tys
       where
@@ -180,7 +194,7 @@ instance Monoid BudgetBalance where
   mempty = Strict
 
 budget :: (Ord ac, Ord u, Num u)
-       => Mechanism ac ty (Outcome (QuasiOutcome out u)) -> BudgetBalance
+       => Mechanism ac ty (QuasiOutcome out u) -> BudgetBalance
 budget (Mechanism acss _ sc) =
   F.fold .
   S.map (balanced . F.sum . transfers . runOutcome . sc) .
@@ -192,11 +206,11 @@ budget (Mechanism acss _ sc) =
       | otherwise = Strict
 
 allocativelyEfficient :: (Ord ty, Num u, Ord u, Ord ac, Narrow con)
-                      => Set out
+                      => Set (Outcome out)
                       -> Game ac con out ty u
                       -> Bool
 allocativelyEfficient outs (Game vls (Mechanism acss tyss sc)) =
-  F.all test $ games tyss acss
+  F.all test $ matches tyss acss
   where
     test gm = totalUtility (sc acs) vls (narrow acs) tys == best
       where
@@ -204,11 +218,11 @@ allocativelyEfficient outs (Game vls (Mechanism acss tyss sc)) =
         best = F.maximum $ S.map (\out -> totalUtility out vls (narrow acs) tys) outs
 
 exPostEfficient :: (Narrow con, Ord ac, Ord ty, Ord u)
-                => Set out
+                => Set (Outcome out)
                 -> Game ac con out ty u
                 -> Bool
 exPostEfficient outs (Game fs (Mechanism acss tyss sc)) =
-  F.all optimal $ games tyss acss
+  F.all optimal $ matches tyss acss
   where
     optimal gm =
       paretoOptimal ((\out -> eachAgent out fs (narrow acs) tys) <$> P.fromList (F.toList outs))
@@ -217,31 +231,31 @@ exPostEfficient outs (Game fs (Mechanism acss tyss sc)) =
         (tys, acs) = P.unzip gm
 
 -- Textbook definition
-paretoOptimal' :: (Ord a) => Coll (Profile (Coll a)) -> Profile (Coll a) -> Bool
+paretoOptimal' :: (Ord a) => Coll (Profile Coll a) -> Profile Coll a -> Bool
 paretoOptimal' cs c =
   not . F.or $ (\c' -> F.and (P.zipWith (>=) c' c) && F.or (P.zipWith (>) c' c)) <$> cs
 
 -- De Morganed (a little clearer, I think)
-paretoOptimal :: (Ord a) => Coll (Profile (Coll a)) -> Profile (Coll a) -> Bool
+paretoOptimal :: (Ord a) => Coll (Profile Coll a) -> Profile Coll a -> Bool
 paretoOptimal cs c =
   F.and $ (\c' -> F.or (P.zipWith (<) c' c) || F.and (P.zipWith (<=) c' c)) <$> cs
 
 
 -- Helper
 
-eachAgent :: out
-          -> Profile (Coll (Utility out acs ty u))
-          -> Profile acs
-          -> Profile (Coll ty)
-          -> Profile (Coll u)
+eachAgent :: Outcome out
+          -> Utilities out con ac ty u
+          -> Profile con (Action ac)
+          -> Types ty
+          -> Utils u
 eachAgent out fs acs = P.zipWith (\f -> f out acs) fs
 
 totalUtility :: (Num u)
-             => out
-             -> Profile (Coll (Utility out acs ty u))
-             -> Profile acs
-             -> Profile (Coll ty)
-             -> u
+             => Outcome out
+             -> Utilities out con ac ty u
+             -> Profile con (Action ac)
+             -> Types ty
+             -> Util u
 totalUtility out fs acs tys = F.sum $ eachAgent out fs acs tys
 
 
@@ -251,22 +265,23 @@ data Project = Completed { perCapitaCost :: Util Double }
              | Failed
   deriving (Eq, Ord, Show)
            
-publicProject :: DirectMechanism (Type (Util Double)) (Outcome (QuasiOutcome (Outcome Project) (Util Double)))
+publicProject :: DirectMechanism (Util Double) (QuasiOutcome Project Double)
 publicProject =
   directMechanism (P.replicate 2 $ S.fromList [20, 60])
-    (\tys ->
-       Outcome $ QuasiOutcome (al tys) (clarkes al (P.replicate (P.length tys) publicValuation) tys))
+    (\acs ->
+       Outcome $ QuasiOutcome (al acs)
+       (clarkes al (P.replicate (P.length acs) publicValuation) $ honest' <$> acs))
   where
     cost = Util 50
     al acs =
-      Outcome $ if F.sum acs > Type cost
+      Outcome $ if F.sum acs > Action cost
                   then Completed (cost / fromIntegral (P.length acs))
                   else Failed
 
 publicOutcomes :: Set (Outcome Project)
 publicOutcomes = S.fromList $ Outcome <$> [Completed 25, Failed]
 
-publicValuation :: Valuation (Outcome Project) (Type (Util Double)) (Util Double)
+publicValuation :: Valuation Project (Util Double) Double
 publicValuation out (Const ()) (Type ty) =
   case out of
     Outcome (Completed cs) -> ty - cs
