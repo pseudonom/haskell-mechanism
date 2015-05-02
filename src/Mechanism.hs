@@ -6,6 +6,7 @@
 module Mechanism where
 
 import           Control.Applicative        (Const (..), pure)
+import           Control.Arrow              (first)
 import           Control.Monad              (replicateM)
 import qualified Data.Foldable              as F
 import           Data.Function              (on)
@@ -69,6 +70,11 @@ type Valuations out ac ty u = Profile Coll (Valuation out ac ty u)
 type QuasiUtilities out ac ty u = Profile Coll (QuasiUtility out ac ty u)
 type ClassicUtilities ac u = Profile Coll (ClassicUtility ac u)
 
+newtype Agent ag = Agent { runAgent :: ag }
+type Agents ag = Profile Coll (Agent ag)
+type Coalition ag = Agents ag
+type Characteristic ag u = Coalition ag -> Util u
+
 data QuasiOutcome out u =
        QuasiOutcome
          { allocation :: Outcome out
@@ -123,7 +129,7 @@ classicUtility f (Outcome ()) acs (Type ()) = f acs
 classicMechanism :: ActionSets ac -> ClassicMechanism ac
 classicMechanism acss =
   Mechanism acss (P.replicate (P.length acss) . S.singleton $ Type ()) (const $ Outcome ())
-                                
+
 -- Quasilinear environment
 
 quasiUtility :: (Num u)
@@ -300,7 +306,9 @@ equilibria :: (Narrow con, Ord ac, Ord u, Ord ty)
 equilibria eq (Game fs (Mechanism acss tyss sc)) =
   S.filter (eq fs sc (profiles acss)) $ matches tyss acss
 
-type Equilibrium out con ac ty u = Utilities out con ac ty u -> SocialChoice ac out -> Set (Actions ac) -> Match ty ac -> Bool
+type Equilibrium out con ac ty u = Utilities out con ac ty u
+                                -> SocialChoice ac out
+                                -> Set (Actions ac) -> Match ty ac -> Bool
 
 implementable :: (Ord ty, Ord out)
               => SocialChoice ac out
@@ -320,7 +328,7 @@ incentiveCompatible :: (Ord ty, Narrow con, Ord u)
 incentiveCompatible eq gm = F.any (F.all isHonest) $ equilibria eq gm
 
 
--- Helper
+-- Helpers
 
 agentUtilities :: Outcome out
                -> Utilities out con ac ty u
@@ -341,7 +349,8 @@ profiles :: (Ord a) => Profile Coll (Set a) -> Set (Profile Coll a)
 profiles tyss =
   S.fromList $ P.fromList <$> T.sequence (F.toList $ F.toList <$> tyss)
 
-strategies :: (Ord ac, Ord ty) => Set (Type ty) -> Set (Action ac) -> Set (Strategy ty ac)
+strategies :: (Ord ac, Ord ty)
+           => Set (Type ty) -> Set (Action ac) -> Set (Strategy ty ac)
 strategies tys acs =
   S.fromList $ P.fromList . zip (F.toList tys) <$>
                replicateM (S.size tys) (F.toList acs)
@@ -359,6 +368,34 @@ matches tyss acss = profiles $ P.zipWith pairs tyss acss
 
 sortGroup :: (Ord b) => (a -> b) -> [a] -> [[a]]
 sortGroup f = L.groupBy ((==) `on` f) . L.sortBy (compare `on` f)
+
+
+-- Cooperative games
+
+shapleyValue :: (Num u, Fractional u)
+             => Coalition ag -> Characteristic ag u -> Agent ag -> Util u
+shapleyValue ags c ag = F.sum $ go <$> powerset ags
+  where
+    go co = (Util $ fac s * fac (n - s) / fac (n + 1)) * (c (ag P.<| co) - c co)
+      where
+        s = P.length co
+        n = P.length ags
+        fac = fromIntegral . factorial
+
+factorial :: Int -> Int
+factorial n = product [1..n]
+
+powerset :: Coll a -> Coll (Coll a)
+powerset = P.filterM (const $ P.fromList [True, False])
+
+characteristic :: (Num u, Narrow con, Ord ac, Ord u)
+               => SocialChoice ac out
+               -> Characteristic (Set (Action ac), (Utility out con ac ty u, Type ty)) u
+characteristic sc ags = F.maximum $ S.map go acss
+  where
+    go acs = F.sum $ (\(f, ty) -> f out (narrow acs) ty) <$> ftys where
+      out = sc acs
+    (acss, ftys) = first profiles . P.unzip $ runAgent <$> ags
 
 
 -- Examples
@@ -395,6 +432,16 @@ publicValuation out (Const ()) (Type ty) =
   case out of
     Outcome (Completed cs) -> ty - cs
     Outcome Failed         -> 0
+
+publicShapley :: Util Double
+publicShapley =
+  shapleyValue (P.fromList [Agent (S.fromList [20, 60], (publicValuation, 20))])
+  (characteristic publicAllocator) $
+  Agent (S.fromList [20, 60], (publicValuation, 60))
+
+publicClarke :: Transfer Double
+publicClarke =
+  clarke (Outcome (Completed 25)) (Outcome Failed) (P.fromList [publicValuation]) (P.fromList [20])
 
 publicExPostRational :: Bool
 publicExPostRational =
@@ -450,12 +497,6 @@ dominantEquilibriaPrison = equilibria dominantEquilibrium prisonGame
 
 nashEquilibriaPrison :: Set (Match () Cooperate)
 nashEquilibriaPrison = equilibria nashEquilibrium prisonGame
-
-
--- type Agent agn = agn
--- type Coalition agn = Set (Agent agn)
--- type Chartyeristic agn b = Coalition agn -> Util b
--- shapleyValue :: Set (Agent agn) -> Chartyeristic agn b -> Util b
 
 -- dictator :: Set (Outcome out) -> SocialChoice ty out ->
 --             Utility out ty u -> Maybe Integer

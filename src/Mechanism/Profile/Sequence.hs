@@ -35,3 +35,18 @@ replicate = S.replicate
 
 length :: Seq a -> Int
 length = S.length
+
+(<|) :: a -> Seq a -> Seq a
+(<|) = (S.<|)
+
+filterM :: (Monad m) => (a -> m Bool) -> Seq a -> m (Seq a)
+filterM p as =
+  case S.viewl as of
+    S.EmptyL -> return S.empty
+    x S.:< xs -> do
+      flg <- p x
+      ys <- filterM p xs
+      return
+        (if flg
+           then x S.<| ys
+           else ys)

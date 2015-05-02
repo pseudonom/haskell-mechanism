@@ -34,3 +34,9 @@ replicate = V.replicate
 
 length :: Vector a -> Int
 length = V.length
+
+(<|) :: a -> Vector a -> Vector a
+(<|) = V.cons
+
+filterM :: (Monad m) => (a -> m Bool) -> Vector a -> m (Vector a)
+filterM = V.filterM
