@@ -1,15 +1,16 @@
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ViewPatterns               #-}
 
 module Mechanism where
 
-import           Control.Applicative        (Const (..), pure, (<*>))
-import           Control.Arrow              (second)
+import           Control.Applicative        (Const (..), pure)
 import           Control.Monad              (replicateM)
 import qualified Data.Foldable              as F
+import           Data.Function              (on)
 import           Data.Functor               ((<$>))
+import qualified Data.List                  as L
 import           Data.Monoid                (Monoid (..))
 import           Data.Set                   (Set)
 import qualified Data.Set                   as S
@@ -37,30 +38,36 @@ newtype Type ty = Type { runType :: ty }
 newtype Action ac = Action { runAction :: ac }
   deriving (Eq, Ord, Num, Show)
 newtype Outcome out = Outcome { runOutcome :: out }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Num, Show)
 newtype Util u = Util { runUtil :: u }
   deriving (Eq, Ord, Num, Fractional, Show)
 
 type Profile con pr = con pr
 type Index i = i
-
-type Utility out con ac ty u = Outcome out -> Profile con (Action ac) -> Type ty -> Util u
-type Valuation out ac ty u = Utility out (Const ()) ac ty u
-type QuasiUtility out ac ty u = Utility (QuasiOutcome out u) (Const ()) ac ty u
-type SocialChoice ac out = Actions ac -> Outcome out
-type Allocator ac out = SocialChoice ac out
 type Transfer u = Util u
 type Strategy ty ac = Coll (Type ty, Action ac)
 type Match ty ac = Profile Coll (Type ty, Action ac)
 
-type Actions a = Profile Coll (Action a)
+type Utility out con ac ty u = Outcome out -> Profile con (Action ac) -> Type ty -> Util u
+type Valuation out ac ty u = Utility out (Const ()) ac ty u
+type QuasiUtility out ac ty u = Utility (QuasiOutcome out u) (Const ()) ac ty u
+type ClassicUtility ac u = Utility () Coll ac () u
+
+type SocialChoice ac out = Actions ac -> Outcome out
+type Allocator ac out = SocialChoice ac out
+
 type Types a = Profile Coll (Type a)
+type Actions a = Profile Coll (Action a)
+type Utils u = Profile Coll (Util u)
 type Transfers u = Profile Coll (Transfer u)
+
 type TypeSets ty = Profile Coll (Set (Type ty))
 type ActionSets ac = Profile Coll (Set (Action ac))
-type Valuations out ac ty u = Profile Coll (Valuation out ac ty u)
+
 type Utilities out con ac ty u = Profile Coll (Utility out con ac ty u)
-type Utils u = Profile Coll (Util u)
+type Valuations out ac ty u = Profile Coll (Valuation out ac ty u)
+type QuasiUtilities out ac ty u = Profile Coll (QuasiUtility out ac ty u)
+type ClassicUtilities ac u = Profile Coll (ClassicUtility ac u)
 
 data QuasiOutcome out u =
        QuasiOutcome
@@ -68,18 +75,21 @@ data QuasiOutcome out u =
          , transfers  :: Transfers u
          }
   deriving (Eq, Ord, Show)
-type DirectMechanism ty out = Mechanism ty ty out
 data Mechanism ac ty out =
        Mechanism
          { actionSets   :: ActionSets ac
          , typeSets     :: TypeSets ty
          , socialChoice :: SocialChoice ac out
          }
-data Game ac con out ty u =
+type DirectMechanism ty out = Mechanism ty ty out
+type ClassicMechanism ac = Mechanism ac () ()
+data Game out con ac ty u =
        Game
          { utilities :: Utilities out con ac ty u
          , mechanism :: Mechanism ac ty out
          }
+type DirectGame out con ty u = Game out con ty ty u
+type ClassicGame ac u = Game () Coll ac () u
 
 class Narrow con where
   narrow :: Profile Coll (Action ac) -> Profile con (Action ac)
@@ -105,6 +115,15 @@ isHonest :: (Eq ty) => (Type ty, Action ty) -> Bool
 isHonest (Type ty, Action ac) = ty == ac
 
 
+-- Classic game (e.g. Prisoner's dilemma)
+
+classicUtility :: (Actions ac -> Util u) -> ClassicUtility ac u
+classicUtility f (Outcome ()) acs (Type ()) = f acs
+
+classicMechanism :: ActionSets ac -> ClassicMechanism ac
+classicMechanism acss =
+  Mechanism acss (P.replicate (P.length acss) . S.singleton $ Type ()) (const $ Outcome ())
+                                
 -- Quasilinear environment
 
 quasiUtility :: (Num u)
@@ -115,8 +134,8 @@ quasiUtility :: (Num u)
 quasiUtility initial vl i (Outcome out) (Const ()) ty =
   initial + vl (allocation out) (Const ()) ty + transfers out P.! i
 
-narrowProfile :: Index Int -> Profile Coll a -> Profile Coll a
-narrowProfile i = P.ifilter (const . (/=) i)
+exclude :: Index Int -> Profile Coll a -> Profile Coll a
+exclude i = P.ifilter (const . (/=) i)
 
 clarkes :: (Num u)
         => Allocator ty out
@@ -124,9 +143,9 @@ clarkes :: (Num u)
         -> Types ty
         -> Transfers u
 clarkes al vls tys =
-  P.imap
-    (\i _ -> clarke (al $ honest <$> tys) (al . narrowProfile i $ honest <$> tys) (narrowProfile i vls) (narrowProfile i tys))
-    tys
+  P.imap (\i _ -> clarke (al acs) (al $ exclude i acs) (exclude i vls) (exclude i tys)) tys
+  where
+    acs = honest <$> tys
 
 clarke :: (Num u)
        => Outcome out
@@ -155,7 +174,7 @@ groves :: (Num u)
         -> Transfers u
         -> Transfers u
 groves out vls tys =
-  P.imap (\i -> grove out (narrowProfile i vls) (narrowProfile i tys))
+  P.imap (\i -> grove out (exclude i vls) (exclude i tys))
 
 
 -- Properties
@@ -168,10 +187,14 @@ groves out vls tys =
 
 exPostRational :: (Ord u, Num u, Ord ty, Ord ac, Narrow con)
                => Utilities out con ac ty u
-               -> Set (Match ty ac, Outcome out) -> Bool
-exPostRational fs =
-  F.all (\(P.unzip -> (tys, acs), out) ->
-          F.all (>= 0) $ eachAgent out fs (narrow acs) tys)
+               -> SocialChoice ac out
+               -> Set (Match ty ac) -> Bool
+exPostRational fs sc = F.all go
+  where
+    go (P.unzip -> (tys, acs)) =
+      F.all (>= 0) $ agentUtilities out fs (narrow acs) tys
+      where
+        out = sc acs
 
 data BudgetBalance = Strict
                    | Weak
@@ -195,27 +218,32 @@ budget os = F.fold . S.map (balanced . F.sum . transfers . runOutcome) $ os
 
 allocativelyEfficient :: (Num u, Ord u)
                       => Set (Outcome out)
-                      -> Valuations out ac ty u
-                      -> Set (Match ty ac, Outcome out)
+                      -> Valuations out ty ty u
+                      -> SocialChoice ty out
+                      -> Set (Types ty)
                       -> Bool
-allocativelyEfficient outs vls =
-  F.all (\(P.unzip -> (tys, _), out) ->
-          totalUtility out vls (Const ()) tys ==
+allocativelyEfficient outs vls sc =
+  F.all (\tys ->
+          totalUtility (sc $ honest <$> tys) vls (Const ()) tys ==
           F.maximum (S.map (\out' -> totalUtility out' vls (Const ()) tys) outs))
 
 exPostEfficient :: (Narrow con, Ord ac, Ord ty, Ord u)
                 => Set (Outcome out)
                 -> Utilities out con ac ty u
-                -> Set (Match ty ac, Outcome out)
+                -> SocialChoice ac out
+                -> Set (Match ty ac)
                 -> Bool
-exPostEfficient outs fs =
-  F.all (\(P.unzip -> (tys, acs), out) ->
-          paretoOptimal ((\out' -> eachAgent out' fs (narrow acs) tys) <$> P.fromList (F.toList outs))
-          (eachAgent out fs (narrow acs) tys))
+exPostEfficient outs fs sc =
+  F.all
+    (\(P.unzip -> (tys, acs)) ->
+       paretoOptimal ((\out' -> agentUtilities out' fs (narrow acs) tys) <$> outs')
+         (agentUtilities (sc acs) fs (narrow acs) tys))
+  where
+    outs' = P.fromList $ F.toList outs
 
 -- Textbook definition
-paretoOptimal' :: (Ord a) => Coll (Profile Coll a) -> Profile Coll a -> Bool
-paretoOptimal' cs c =
+paretoOptimal_ :: (Ord a) => Coll (Profile Coll a) -> Profile Coll a -> Bool
+paretoOptimal_ cs c =
   not . F.or $ (\c' -> F.and (P.zipWith (>=) c' c) && F.or (P.zipWith (>) c' c)) <$> cs
 
 -- De Morganed (a little clearer, I think)
@@ -223,15 +251,83 @@ paretoOptimal :: (Ord a) => Coll (Profile Coll a) -> Profile Coll a -> Bool
 paretoOptimal cs c =
   F.and $ (\c' -> F.or (P.zipWith (<) c' c) || F.and (P.zipWith (<=) c' c)) <$> cs
 
+dominantEquilibrium :: (Narrow con, Ord ac, Ord u)
+                    => Utilities out con ac ty u
+                    -> SocialChoice ac out
+                    -> Set (Actions ac)
+                    -> Match ty ac
+                    -> Bool
+dominantEquilibrium fs sc acss m =
+  F.and . P.imap (\i ((ty, ac), f) -> dominant f sc acss ty ac i) $ P.zip m fs
+
+dominant :: (Ord ac, Narrow con, Ord u)
+         => Utility out con ac ty u
+         -> SocialChoice ac out
+         -> Set (Actions ac)
+         -> Type ty
+         -> Action ac
+         -> Index Int
+         -> Bool
+dominant f sc acss ty ac i =
+  F.all best . fmap (L.partition ((==) ac . flip (P.!) i)) .
+               sortGroup (exclude i) $ F.toList acss
+  where
+    best ([strat], others) =
+      F.all (\other -> u >= f (sc other) (narrow other) ty) others
+      where
+        u = f (sc strat) (narrow strat) ty
+
+nashEquilibrium :: (Eq ac, Narrow con, Ord u)
+                => Utilities out con ac ty u
+                -> SocialChoice ac out
+                -> Set (Actions ac)
+                -> Match ty ac
+                -> Bool
+nashEquilibrium fs sc acss m = F.and . P.imap each $ P.zip m fs
+  where
+    each i ((ty, ac), f) = best . S.partition ((==) ac . flip (P.!) i) $
+      S.filter (\acs' -> acs == exclude i acs') acss
+      where
+        acs = exclude i . snd $ P.unzip m
+        best (S.elemAt 0 -> strat, others) =
+          F.all (\other -> f out (narrow strat) ty >=
+                           f (sc other) (narrow other) ty) others
+          where
+            out = sc strat
+
+equilibria :: (Narrow con, Ord ac, Ord u, Ord ty)
+           => Equilibrium out con ac ty u -> Game out con ac ty u -> Set (Match ty ac)
+equilibria eq (Game fs (Mechanism acss tyss sc)) =
+  S.filter (eq fs sc (profiles acss)) $ matches tyss acss
+
+type Equilibrium out con ac ty u = Utilities out con ac ty u -> SocialChoice ac out -> Set (Actions ac) -> Match ty ac -> Bool
+
+implementable :: (Ord ty, Ord out)
+              => SocialChoice ac out
+              -> Set (Match ty ac)
+              -> SocialChoice ty out
+              -> Bool
+implementable sca ms sct = F.all go $ S.map (fst . P.unzip) ms
+  where
+    go tys =
+      S.member (sct $ honest <$> tys) .
+      S.map (sca . snd . P.unzip) $
+        S.filter ((==) tys . fst . P.unzip) ms
+
+incentiveCompatible :: (Ord ty, Narrow con, Ord u)
+                    => Equilibrium out con ty ty u
+                    -> DirectGame out con ty u -> Bool
+incentiveCompatible eq gm = F.any (F.all isHonest) $ equilibria eq gm
+
 
 -- Helper
 
-eachAgent :: Outcome out
-          -> Utilities out con ac ty u
-          -> Profile con (Action ac)
-          -> Types ty
-          -> Utils u
-eachAgent out fs acs = P.zipWith (\f -> f out acs) fs
+agentUtilities :: Outcome out
+               -> Utilities out con ac ty u
+               -> Profile con (Action ac)
+               -> Types ty
+               -> Utils u
+agentUtilities out fs acs = P.zipWith (\f -> f out acs) fs
 
 totalUtility :: (Num u)
              => Outcome out
@@ -239,7 +335,7 @@ totalUtility :: (Num u)
              -> Profile con (Action ac)
              -> Types ty
              -> Util u
-totalUtility out fs acs tys = F.sum $ eachAgent out fs acs tys
+totalUtility out fs acs tys = F.sum $ agentUtilities out fs acs tys
 
 profiles :: (Ord a) => Profile Coll (Set a) -> Set (Profile Coll a)
 profiles tyss =
@@ -251,9 +347,9 @@ strategies tys acs =
                replicateM (S.size tys) (F.toList acs)
 
 matches :: (Ord ac, Ord ty)
-      => TypeSets ty
-      -> ActionSets ac
-      -> Set (Match ty ac)
+        => TypeSets ty
+        -> ActionSets ac
+        -> Set (Match ty ac)
 matches tyss acss = profiles $ P.zipWith pairs tyss acss
   where
     pairs tys acs = S.fromList . F.toList $ do
@@ -261,30 +357,35 @@ matches tyss acss = profiles $ P.zipWith pairs tyss acss
       ac <- F.toList acs
       pure (ty, ac)
 
-matches' :: (Ord out, Ord ty, Ord ac)
-         => Mechanism ac ty out -> Set (Match ty ac, Outcome out)
-matches' (Mechanism acss tyss sc) =
-  S.map ((,) <*> sc . snd . P.unzip) $ matches tyss acss
+sortGroup :: (Ord b) => (a -> b) -> [a] -> [[a]]
+sortGroup f = L.groupBy ((==) `on` f) . L.sortBy (compare `on` f)
 
 
--- Example
+-- Examples
 
 data Project = Completed { perCapitaCost :: Util Double }
              | Failed
   deriving (Eq, Ord, Show)
 
-publicProject :: DirectMechanism (Util Double) (QuasiOutcome Project Double)
-publicProject =
-  directMechanism (P.replicate 2 $ S.fromList [20, 60])
-    (\acs ->
-       Outcome $ QuasiOutcome (al acs)
-       (clarkes al (P.replicate (P.length acs) publicValuation) $ honest' <$> acs))
+publicUtilities :: QuasiUtilities Project (Util Double) (Util Double) Double
+publicUtilities = quasiUtility 0 publicValuation <$> P.fromList [0, 1]
+
+publicMechanism :: DirectMechanism (Util Double) (QuasiOutcome Project Double)
+publicMechanism =
+  directMechanism (P.replicate 2 $ S.fromList [20, 60]) publicChoice
+
+publicChoice :: SocialChoice (Util Double) (QuasiOutcome Project Double)
+publicChoice acs =
+  Outcome $ QuasiOutcome (publicAllocator acs)
+              (clarkes publicAllocator (P.replicate (P.length acs) publicValuation) $ honest' <$> acs)
+
+publicAllocator :: Allocator (Util Double) Project
+publicAllocator acs =
+  Outcome $ if F.sum acs >= Action cost
+              then Completed (cost / fromIntegral (P.length acs))
+              else Failed
   where
     cost = Util 50
-    al acs =
-      Outcome $ if F.sum acs >= Action cost
-                  then Completed (cost / fromIntegral (P.length acs))
-                  else Failed
 
 publicOutcomes :: Set (Outcome Project)
 publicOutcomes = S.fromList $ Outcome <$> [Completed 25, Failed]
@@ -297,40 +398,69 @@ publicValuation out (Const ()) (Type ty) =
 
 publicExPostRational :: Bool
 publicExPostRational =
-  exPostRational (quasiUtility 0 publicValuation <$> P.fromList [0, 1]) $
-    matches' publicProject
+  exPostRational (quasiUtility 0 publicValuation <$> P.fromList [0, 1]) publicChoice $
+    matches (typeSets publicMechanism) (actionSets publicMechanism)
 
 publicBudget :: BudgetBalance
 publicBudget = budget . S.map (sc . snd . P.unzip) $ matches tyss acss
   where
-    (Mechanism acss tyss sc) = publicProject
+    (Mechanism acss tyss sc) = publicMechanism
 
 publicAllocative :: Bool
 publicAllocative =
-  allocativelyEfficient publicOutcomes (P.replicate 2 publicValuation)
-    (S.map (second (allocation . runOutcome)) .
-     S.filter (F.all isHonest . fst) $ matches' publicProject)
+  allocativelyEfficient
+    publicOutcomes
+    (P.replicate 2 publicValuation)
+    (allocation . runOutcome . socialChoice publicMechanism)
+    (profiles $ typeSets publicMechanism)
 
--- equilibria :: EquilibriumType -> Mechanism ty out -> Strategy ty
--- implementable :: EquilibriumType -> Mechanism ty out ->
---                  SocialChoice ty out -> Bool
--- implements :: EquilibriumType -> Mechanism ty out -> SocialChoice ty out ->
---               Strategy ty -> Bool
--- incentiveCompatible :: EquilibriumType -> DirectMechanism ty out -> Bool
--- dominant :: EquilibriumType
--- nash :: EquilibriumType
--- bayesNash :: EquilibriumType
+data Cooperate = Cooperate | Defect deriving (Eq, Ord, Show)
 
--- dictator :: Set (Outcome out) -> SocialChoice ty out ->
---             Utility out ty u -> Maybe Integer
--- exAnteRational :: Dist Profile -> Utility out ty u -> Mechanism ty out u -> Bool
--- interimRational :: Dist Profile -> Utility out ty u -> Mechanism ty out u -> Bool
+prisonMechanism :: ClassicMechanism Cooperate
+prisonMechanism =
+  classicMechanism (P.replicate 2 $ S.fromList [Action Cooperate, Action Defect])
+
+player1 :: Actions Cooperate -> Util Int
+player1 acs = case F.toList $ runAction <$> acs of
+  [Cooperate, Cooperate] -> 2
+  [Cooperate, Defect] -> 0
+  [Defect, Cooperate] -> 3
+  [Defect, Defect] -> 1
+
+player2 :: Actions Cooperate -> Util Int
+player2 acs = case F.toList $ runAction <$> acs of
+  [Cooperate, Cooperate] -> 2
+  [Cooperate, Defect] -> 3
+  [Defect, Cooperate] -> 0
+  [Defect, Defect] -> 1
+
+prisonUtilities :: ClassicUtilities Cooperate Int
+prisonUtilities = classicUtility <$> P.fromList [player1, player2]
+
+prisonGame :: ClassicGame Cooperate Int
+prisonGame = Game prisonUtilities prisonMechanism
+
+exPostRationalPrison :: Bool
+exPostRationalPrison = exPostRational fs sc $ matches tyss acss
+  where
+    Game fs (Mechanism acss tyss sc) = prisonGame
+
+dominantEquilibriaPrison :: Set (Match () Cooperate)
+dominantEquilibriaPrison = equilibria dominantEquilibrium prisonGame
+
+nashEquilibriaPrison :: Set (Match () Cooperate)
+nashEquilibriaPrison = equilibria nashEquilibrium prisonGame
+
 
 -- type Agent agn = agn
 -- type Coalition agn = Set (Agent agn)
 -- type Chartyeristic agn b = Coalition agn -> Util b
 -- shapleyValue :: Set (Agent agn) -> Chartyeristic agn b -> Util b
 
+-- dictator :: Set (Outcome out) -> SocialChoice ty out ->
+--             Utility out ty u -> Maybe Integer
+-- exAnteRational :: Dist Profile -> Utility out ty u -> Mechanism ty out u -> Bool
+-- interimRational :: Dist Profile -> Utility out ty u -> Mechanism ty out u -> Bool
 
 -- monotonic :: Set (Outcome out) -> Utility out ty u ->
 --              Mechanism (Type ty) out u -> Bool
