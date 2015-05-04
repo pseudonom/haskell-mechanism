@@ -40,3 +40,6 @@ length = V.length
 
 filterM :: (Monad m) => (a -> m Bool) -> Vector a -> m (Vector a)
 filterM = V.filterM
+
+partition :: (a -> Bool) -> Vector a -> (Vector a, Vector a)
+partition = V.partition

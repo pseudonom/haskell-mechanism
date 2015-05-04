@@ -50,3 +50,6 @@ filterM p as =
         (if flg
            then x S.<| ys
            else ys)
+
+partition :: (a -> Bool) -> Seq a -> (Seq a, Seq a)
+partition = S.partition

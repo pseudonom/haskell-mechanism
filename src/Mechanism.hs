@@ -48,6 +48,7 @@ type Index i = i
 type Transfer u = Util u
 type Strategy ty ac = Coll (Type ty, Action ac)
 type Match ty ac = Profile Coll (Type ty, Action ac)
+type ClassicMatch ac = Match () ac
 
 type Utility out con ac ty u = Outcome out -> Profile con (Action ac) -> Type ty -> Util u
 type Valuation out ac ty u = Utility out (Const ()) ac ty u
@@ -77,24 +78,26 @@ type Characteristic ag u = Coalition ag -> Util u
 
 data QuasiOutcome out u =
        QuasiOutcome
-         { allocation :: Outcome out
-         , transfers  :: Transfers u
+         { runAllocation :: Outcome out
+         , runTransfers  :: Transfers u
          }
   deriving (Eq, Ord, Show)
 data Mechanism ac ty out =
        Mechanism
-         { actionSets   :: ActionSets ac
-         , typeSets     :: TypeSets ty
-         , socialChoice :: SocialChoice ac out
+         { runActionSets   :: ActionSets ac
+         , runTypeSets     :: TypeSets ty
+         , runSocialChoice :: SocialChoice ac out
          }
 type DirectMechanism ty out = Mechanism ty ty out
 type ClassicMechanism ac = Mechanism ac () ()
 data Game out con ac ty u =
        Game
-         { utilities :: Utilities out con ac ty u
-         , mechanism :: Mechanism ac ty out
+         { runUtilities :: Utilities out con ac ty u
+         , runMechanism :: Mechanism ac ty out
          }
 type DirectGame out con ty u = Game out con ty ty u
+type QuasiGame out ac ty u = Game (QuasiOutcome out u) (Const ()) ac ty u
+type DirectQuasiGame out ty u = Game (QuasiOutcome out u) (Const ()) ty ty u
 type ClassicGame ac u = Game () Coll ac () u
 
 class Narrow con where
@@ -132,13 +135,16 @@ classicMechanism acss =
 
 -- Quasilinear environment
 
+valuation :: (Outcome out -> Type ty -> Util u) -> Valuation out ty ty u
+valuation vl out (Const ()) = vl out
+
 quasiUtility :: (Num u)
              => Util u
              -> Valuation out ac ty u
              -> Index Int
              -> QuasiUtility out ac ty u
-quasiUtility initial vl i (Outcome out) (Const ()) ty =
-  initial + vl (allocation out) (Const ()) ty + transfers out P.! i
+quasiUtility initial vl i (Outcome (QuasiOutcome al tr)) (Const ()) ty =
+  initial + vl al (Const ()) ty + tr P.! i
 
 exclude :: Index Int -> Profile Coll a -> Profile Coll a
 exclude i = P.ifilter (const . (/=) i)
@@ -185,10 +191,10 @@ groves out vls tys =
 
 -- Properties
 
--- We've modified the standard properties to work with indirect games.
+-- We've modified the standard properties a bit to work with indirect games.
 -- Instead of passing in a game and checking for all type profiles,
 -- we pass in the matches.
--- By filtering, we choose whether to check the property
+-- By pre-filtering, we choose whether to check the property
 -- for all matches, all honest matches, all equilibrium matches, etc.
 
 exPostRational :: (Ord u, Num u, Ord ty, Ord ac, Narrow con)
@@ -215,7 +221,7 @@ instance Monoid BudgetBalance where
   mempty = Strict
 
 budget :: (Ord u, Num u) => Set (Outcome (QuasiOutcome out u)) -> BudgetBalance
-budget os = F.fold . S.map (balanced . F.sum . transfers . runOutcome) $ os
+budget os = F.fold . S.map (balanced . F.sum . runTransfers . runOutcome) $ os
   where
     balanced n
       | n > 0 = Not
@@ -397,106 +403,6 @@ characteristic sc ags = F.maximum $ S.map go acss
       out = sc acs
     (acss, ftys) = first profiles . P.unzip $ runAgent <$> ags
 
-
--- Examples
-
-data Project = Completed { perCapitaCost :: Util Double }
-             | Failed
-  deriving (Eq, Ord, Show)
-
-publicUtilities :: QuasiUtilities Project (Util Double) (Util Double) Double
-publicUtilities = quasiUtility 0 publicValuation <$> P.fromList [0, 1]
-
-publicMechanism :: DirectMechanism (Util Double) (QuasiOutcome Project Double)
-publicMechanism =
-  directMechanism (P.replicate 2 $ S.fromList [20, 60]) publicChoice
-
-publicChoice :: SocialChoice (Util Double) (QuasiOutcome Project Double)
-publicChoice acs =
-  Outcome $ QuasiOutcome (publicAllocator acs)
-              (clarkes publicAllocator (P.replicate (P.length acs) publicValuation) $ honest' <$> acs)
-
-publicAllocator :: Allocator (Util Double) Project
-publicAllocator acs =
-  Outcome $ if F.sum acs >= Action cost
-              then Completed (cost / fromIntegral (P.length acs))
-              else Failed
-  where
-    cost = Util 50
-
-publicOutcomes :: Set (Outcome Project)
-publicOutcomes = S.fromList $ Outcome <$> [Completed 25, Failed]
-
-publicValuation :: Valuation Project (Util Double) (Util Double) Double
-publicValuation out (Const ()) (Type ty) =
-  case out of
-    Outcome (Completed cs) -> ty - cs
-    Outcome Failed         -> 0
-
-publicShapley :: Util Double
-publicShapley =
-  shapleyValue (P.fromList [Agent (S.fromList [20, 60], (publicValuation, 20))])
-  (characteristic publicAllocator) $
-  Agent (S.fromList [20, 60], (publicValuation, 60))
-
-publicClarke :: Transfer Double
-publicClarke =
-  clarke (Outcome (Completed 25)) (Outcome Failed) (P.fromList [publicValuation]) (P.fromList [20])
-
-publicExPostRational :: Bool
-publicExPostRational =
-  exPostRational (quasiUtility 0 publicValuation <$> P.fromList [0, 1]) publicChoice $
-    matches (typeSets publicMechanism) (actionSets publicMechanism)
-
-publicBudget :: BudgetBalance
-publicBudget = budget . S.map (sc . snd . P.unzip) $ matches tyss acss
-  where
-    (Mechanism acss tyss sc) = publicMechanism
-
-publicAllocative :: Bool
-publicAllocative =
-  allocativelyEfficient
-    publicOutcomes
-    (P.replicate 2 publicValuation)
-    (allocation . runOutcome . socialChoice publicMechanism)
-    (profiles $ typeSets publicMechanism)
-
-data Cooperate = Cooperate | Defect deriving (Eq, Ord, Show)
-
-prisonMechanism :: ClassicMechanism Cooperate
-prisonMechanism =
-  classicMechanism (P.replicate 2 $ S.fromList [Action Cooperate, Action Defect])
-
-player1 :: Actions Cooperate -> Util Int
-player1 acs = case F.toList $ runAction <$> acs of
-  [Cooperate, Cooperate] -> 2
-  [Cooperate, Defect] -> 0
-  [Defect, Cooperate] -> 3
-  [Defect, Defect] -> 1
-
-player2 :: Actions Cooperate -> Util Int
-player2 acs = case F.toList $ runAction <$> acs of
-  [Cooperate, Cooperate] -> 2
-  [Cooperate, Defect] -> 3
-  [Defect, Cooperate] -> 0
-  [Defect, Defect] -> 1
-
-prisonUtilities :: ClassicUtilities Cooperate Int
-prisonUtilities = classicUtility <$> P.fromList [player1, player2]
-
-prisonGame :: ClassicGame Cooperate Int
-prisonGame = Game prisonUtilities prisonMechanism
-
-exPostRationalPrison :: Bool
-exPostRationalPrison = exPostRational fs sc $ matches tyss acss
-  where
-    Game fs (Mechanism acss tyss sc) = prisonGame
-
-dominantEquilibriaPrison :: Set (Match () Cooperate)
-dominantEquilibriaPrison = equilibria dominantEquilibrium prisonGame
-
-nashEquilibriaPrison :: Set (Match () Cooperate)
-nashEquilibriaPrison = equilibria nashEquilibrium prisonGame
 
 -- dictator :: Set (Outcome out) -> SocialChoice ty out ->
 --             Utility out ty u -> Maybe Integer
