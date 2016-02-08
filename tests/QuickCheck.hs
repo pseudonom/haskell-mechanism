@@ -6,12 +6,10 @@ module Main where
 import           Data.Functor ((<$>))
 
 import           Test.QuickCheck
--- import           Distribution.TestSuite
--- import           Distribution.TestSuite.QuickCheck   
 
 import           Mechanism
-import           Mechanism.Profile.Vector (Coll)
-import qualified Mechanism.Profile.Vector as P
+import           Mechanism.Profile.Sequence (Coll)
+import qualified Mechanism.Profile.Sequence as P
 
 type ParetoInput a = (Coll (Coll a), Coll a)
 
@@ -25,7 +23,7 @@ instance (Arbitrary a) => Arbitrary (ParetoInput a) where
     return (cs, c)
 
 pareto :: ParetoInput Int -> Bool
-pareto a = uncurry paretoOptimal a == uncurry paretoOptimal' a
+pareto a = uncurry paretoOptimal a == uncurry paretoOptimal_ a
 
 -- Fails with:
 -- Module ‘Distribution.Simple.Test’ does not export ‘stubMain’
